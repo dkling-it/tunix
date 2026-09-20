@@ -391,7 +391,7 @@ def _compute_host_subgrid(
   return None
 
 
-class RaidenSynchronizer:
+class RaidenSynchronizer(weight_sync.WeightSynchronizer):
   """One host's weights on the raiden transport, plus its registration metadata.
 
   Used by both the trainer and the sampler. Construct with a state to bind
@@ -409,7 +409,9 @@ class RaidenSynchronizer:
       auto_h2d: bool = False,
       parallelism: int = 4,
       bind_ip: Optional[str] = None,
+      **kwargs: Any,
   ):
+    del kwargs
     is_proxy = "proxy" in os.environ.get("JAX_PLATFORMS", "")
     self.job_name = job_name
     self.worker_index = worker_index
@@ -704,7 +706,8 @@ class RaidenSynchronizer:
       )
     return self._sync
 
-  def d2h(self) -> None:
+  def d2h(self, sync_request: Any = None) -> None:
+    del sync_request
     if self._is_proxy:
       try:
         self._init_ffi_transport(is_d2h=True)
@@ -724,7 +727,8 @@ class RaidenSynchronizer:
 
     self._require_sync("d2h()").d2h()
 
-  def h2d(self) -> None:
+  def h2d(self, sync_request: Any = None, **kwargs: Any) -> None:
+    del sync_request, kwargs
     if not self.bound:
       raise RuntimeError(f"{self.job_name}: bind() must run before h2d()")
     if self._is_proxy:
@@ -815,6 +819,10 @@ class RaidenSynchronizer:
     runner.state = jax.tree_util.tree_unflatten(
         jax.tree_util.tree_structure(runner.state), new_leaves
     )
+    if hasattr(runner, "refresh_state_leaves") and callable(
+        runner.refresh_state_leaves
+    ):
+      runner.refresh_state_leaves()
     logging.info(
         "%s apply_to_runner: successfully applied %d arrays to runner state and"
         " state_leaves (total runner leaves: %d).",
@@ -835,17 +843,34 @@ class RaidenSynchronizer:
   def metrics(self) -> dict:
     return self._sync.get_metrics() if self._sync else {}
 
-  def checksums(self, sample: int = 3) -> dict:
+  def checksums(self, sample: Optional[int] = 3) -> dict:
     """Per-tensor float32 abs-sums for cross-process verification."""
+    if not self.arrays:
+      return {
+          "__grand_total__": 0.0,
+          "__tensor_count__": 0,
+          "__element_count__": 0,
+      }
 
-    def total(arr):
-      return float(jnp.sum(jnp.abs(arr).astype(jnp.float32)))
+    import numpy as np  # pylint: disable=g-import-not-at-top
 
-    head = {
-        name: total(arr)
-        for name, arr in list(zip(self.names, self.arrays))[:sample]
-    }
-    head["__grand_total__"] = float(sum(total(a) for a in self.arrays))
+    per_tensor = np.asarray(
+        jnp.stack([jnp.sum(jnp.abs(a), dtype=jnp.float32) for a in self.arrays]),
+        dtype=np.float64,
+    )
+    verify_all = sample is None or os.environ.get(
+        "VERIFY_WEIGHTS", ""
+    ).lower() in ("1", "true", "yes", "y", "t")
+    limit = len(self.arrays) if verify_all else min(sample, len(self.arrays))
+
+    head: dict[str, Any] = {}
+    for idx in range(limit):
+      name = self.names[idx]
+      val = float(per_tensor[idx])
+      key = _param_key(name) if verify_all else name
+      head[key or name] = val
+
+    head["__grand_total__"] = float(per_tensor.sum())
     # Registration pairs tensors by position, so the totals only compare when
     # both sides bound the same set. Check these before trusting a mismatch.
     head["__tensor_count__"] = len(self.arrays)
@@ -894,6 +919,15 @@ class RaidenSynchronizer:
         job_name=self.job_name,
         job_replica_id=str(self.worker_index) if self.worker_index else "",
     )
+    checksums = None
+    if os.environ.get("VERIFY_WEIGHTS", "").lower() in (
+        "1",
+        "true",
+        "yes",
+        "y",
+        "t",
+    ):
+      checksums = self.checksums(sample=None)
     return weight_sync.WorkUnitMetadata(
         unit=unit,
         shards=shards,
@@ -904,7 +938,11 @@ class RaidenSynchronizer:
         transport_mode="ffi" if self._is_proxy else "tcp",
         use_ffi=self._is_proxy,
         host_subgrid=self._host_subgrid,
+        checksums=checksums,
     )
+
+
+RaidenWeightSync = RaidenSynchronizer
 
 
 def patch_raiden_worker_sync() -> None:
@@ -938,3 +976,11 @@ def patch_raiden_worker_sync() -> None:
     )
   except AttributeError as e:
     logging.debug("tpu_inference not available to patch: %s", e)
+
+  try:
+    from tunix.experimental.weight_sync import gcs_weight_sync  # pylint: disable=g-import-not-at-top
+
+    gcs_weight_sync.patch_tpu_worker_gcs_sync()
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    logging.debug("Could not patch TPUWorker for GCS weight sync: %s", e)
+
