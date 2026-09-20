@@ -169,6 +169,16 @@ def create_default_handler(
     )
     logging.info("Built RaidenHandler natively; port %d", handler.port)
     return handler
+  elif mode_name in (
+      weight_sync.WeightSyncMode.GCS.value,
+      "file",
+      "filesystem",
+  ):
+    from tunix.experimental.weight_sync import gcs_weight_sync
+
+    handler = gcs_weight_sync.GCSWeightSyncHandler()
+    logging.info("Built GCSWeightSyncHandler for file/GCS weight sync.")
+    return handler
   elif mode_name in (weight_sync.WeightSyncMode.FALLBACK.value, "noop", "no-op"):
     logging.info(
         "Built fallback NullHandler; weight sync running protocol-only."
@@ -724,13 +734,23 @@ class WeightSyncCoordinator:
     The round's identity (req_id, uuid, round_index) rides in `extra_config`:
     workers key their `WorkerRoundTracker` on it.
     """
+    handler_extra: dict[str, Any] = {}
+    if hasattr(self._handler, "build_extra_config"):
+      handler_extra = dict(
+          self._handler.build_extra_config(source_metadata or ()) or {}
+      )
+    merged_extra = {
+        **handler_extra,
+        "req_id": req_id,
+        "uuid": uuid,
+        "round_index": round_index,
+        **extra_config,
+    }
     return datatypes.WeightSyncRequest(
         controller_id=self._controller_id,
         policy_version=policy_version,
         source_metadata=source_metadata,
-        extra_config=dict(
-            req_id=req_id, uuid=uuid, round_index=round_index, **extra_config
-        ),
+        extra_config=merged_extra,
     )
 
   # ------------------------------------------------------------- phase plumbing

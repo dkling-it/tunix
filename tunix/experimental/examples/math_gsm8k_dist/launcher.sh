@@ -77,6 +77,7 @@ WANDB_API_KEY=${WANDB_API_KEY:-}
 TRAJECTORY_LOG_DIR=${TRAJECTORY_LOG_DIR:-}
 SAMPLER=${SAMPLER:-inprocess_vllm}
 WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE:-none}
+WEIGHT_SYNC_GCS_DIR=${WEIGHT_SYNC_GCS_DIR:-"${ARTIFACT_ROOT}/weight_sync_staging"}
 USE_ROLLOUT_LOGPS=${USE_ROLLOUT_LOGPS:-true}
 CHAT_PARSER=${CHAT_PARSER:-raw}
 # Model-specific EOS token IDs (comma-separated), fetched from HuggingFace
@@ -600,8 +601,10 @@ echo "Launching trainer node on TPU chips $TRAINER_TPU_CHIPS..."
     export LIBTPU_INIT_ARGS="--deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS} --deepsea_host_bounds=${TPU_HOST_BOUNDS}"
   fi
   export VERIFY_WEIGHTS=${VERIFY_WEIGHTS}
+  export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE}
+  export WEIGHT_SYNC_GCS_DIR=${WEIGHT_SYNC_GCS_DIR}
   export PYTHONUNBUFFERED=1
-  env | egrep 'JAX|TPU'
+  env | egrep 'JAX|TPU|WEIGHT_SYNC'
   print_command "Trainer command" "${TRAINER_CMD[@]}"
   exec "${TRAINER_CMD[@]}" > "$TRAINER_LOG" 2>&1
 ) &
@@ -652,6 +655,9 @@ echo "Launching rollout node with sampler=$SAMPLER on TPU chips $ROLLOUT_TPU_CHI
   export TPU_HOST_BOUNDS=${TPU_HOST_BOUNDS}
   export LIBTPU_INIT_ARGS="--deepsea_chips_per_host_bounds=${TPU_CHIPS_PER_HOST_BOUNDS} --deepsea_host_bounds=${TPU_HOST_BOUNDS}"
   export VERIFY_WEIGHTS=${VERIFY_WEIGHTS}
+  export WEIGHT_SYNC_MODE=${WEIGHT_SYNC_MODE}
+  export WEIGHT_SYNC_GCS_DIR=${WEIGHT_SYNC_GCS_DIR}
+  export VLLM_ALLOW_INSECURE_SERIALIZATION=1
   export PYTHONUNBUFFERED=1
   env | egrep 'JAX|TPU'
   print_command "Rollout command" "${ROLLOUT_CMD[@]}"
